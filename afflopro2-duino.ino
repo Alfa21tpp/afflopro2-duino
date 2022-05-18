@@ -3,20 +3,17 @@
  */
 
 /* TODO:
-- sincronizzare stato
-se ruolo reader, accettare stato writer
-oppure se stato non sincronizzato accettare turno maggiore tra reader e writer
-
-- a inizio turno eseguire sync_check()
-
-sync_check() verifica il turno
-sync_do() allinea (copia) bFM bFA e turno da chi ha turno maggiore
-msg_send() invia messaggio con checksum e continua ritrasmissione in caso di errori
-msg_recv() riceve messaggio con checksum e rimanda il messaggio come ack
-
+- verifica fine partita (conto quante caselle as o pn ci sono sul campo)
+- memorizzare ultimo pixel a segno per cercare nave attorno
 - creare un menu per scelta se gioco contro computer o contro remoto
+- separare il gioco dalla base di sincronia e metterlo in un file separato
 - tic tac toe?
-- reset radio su timeout ack
+- messaggi brevi (delta) piuttosto che rimandare sempre tutto?
+- display bFA a termine turno
+- reset radio reader dopo attesa prolungata
+- ripristino gioco umano-vs-cpu su singolo device
+- mostrare x/12 in schermata mira umano
+- torna a capo nella seriale stampando la linea di bF
 */
 
 /* Connections:
@@ -74,21 +71,6 @@ const char prmM[] PROGMEM = "\nMotovedetta:\n";
 */
 
 
-// the arrays for the two players:
-//static uint8_t array1[BUFFER_HEIGHT * BUFFER_WIDTH / 8]; /*= {
-/*
-static uint8_t array1[] = {
-	'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h',
-	'2', 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-	128, 129, 130, 131, 132, 133, 134, 135,
-	136, 137, 138, 139, 140, 141, 142, 143,
-	144, 145, 146, 147, 148, 149, 150, 151,
-	152, 153, 154, 155, 156, 157, 158, 159,
-	'7', 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-	'8', 183, '*', 164, 176, '.', 'x', 'X'
-};
-*/
-
 //==
 #define DEBUG         //DECOMMENTARE PER STAMPE DEBUG
 #define DEBUG_avv     //DECOMMENTARE PER STAMPE DEBUG avverso
@@ -121,20 +103,15 @@ static uint8_t array1[] = {
 //definizione colori pixel piazzamento navi
 #define pn 35    //pixel con nave
 //definizione colori pixel colpo a vuoto
-#define av 0    //pixel spento
-//definizione colori pixel colpo a segno dell'avversario
+#define av 20    //pixel a vuoto
+//definizione colori pixel colpo a segno
 #define as 42    //pixel a segno
-//definizione colori pixel colpo sparato proprio
-#define sp 0    //pixel spento
-//definizioni colori sfondo proprio
-#define fp 126    //pixel vuoto
-//definizione colori pixel sfondo avversario
-#define fa 126    //pixel vuoto
+//definizione colori pixel sfondo
+#define pm 126    //pixel mare
 //definizione colori pixel cursore
 
 //#define battleFieldMia bFM
 //#define battleFieldAltro bFA
-//#define battleFieldTmp bFT
 
 //definizione celle per EEPROM
 #define totBattMsb 0
@@ -157,35 +134,26 @@ U8X8_SSD1306_128X64_NONAME_HW_I2C lcd(/* reset=*/ U8X8_PIN_NONE);
 //U8G2_SH1106_128X64_NONAME_1_HW_I2C lcd(U8G2_R0, /* reset=*/ U8X8_PIN_NONE);   // All Boards without Reset of the Display
 
 //==VARIABILI GLOBALI=========================================================
-unsigned long timeInit;
-unsigned long timeTotal;
-long casuale;
-long num02, num05, num06, num07, num08;  //usati per random()
-int currLed;
-int nNavi;
-int estratto;
-int fine;
-int colpiPropri;
-int colpiPropriAsegno;
-int colpiAvverso;
-int colpiAvversoAsegno;
+uint8_t num02, num05, num06, num07, num08;  //usati per random()
+uint8_t fine;
+uint8_t currLed;
+uint8_t estratto;
+
 int memNavi[12];             //posizionamento navi avversario
 int posiz[4];                //posizionamento temporaneo pixel navi
 int posizionamento;
+bool orientamento;  //orienatmento nave (ORIZZONTALE / VERTICALE)
 int toggleGO;
 int *pNave;
 int nave[4];
 int lNave;
 int currLim;
 int ind;
-int valE;
-int vittorie, colpi, intColpi, decColpi;
-int adia[4];     //matrice adiacenze
+int adia[4];      //matrice adiacenze
 int aSegno[12];   //matrice colpi a segno AVVERSO
 int turno;        //controllo alternanza colpi
 int regime;       //controllo colpi avverso
 int lista;        //switch fra liste colpi efficaci
-int orientamento;  //orienatmento nave (ORIZZONTALE / VERTICALE)
 int minLim;       //limite minimo nave
 int maxLim;       //limite massimo nave
 int minHit;       //pixel da colpire poppanave
@@ -198,22 +166,8 @@ byte input[1+MSG_SIZE], output[MSG_SIZE]; //input MUST be 1byte bigger than inco
 byte bFM[64];   //battleFieldMia   = display campo di battaglia proprio
 byte bFA[64];   //battleFieldAltro = display campo di battaglia avversario
 
-//byte battleFieldMia[64][4];   //display campo di battaglia proprio
-//byte battleFieldAltro[64][4]; //display campo di battaglia avversario
-//byte battleFieldTmp[64];   //display campo di battaglia layer temporaneo
-//byte cella[2][21] = {{2,5,9,12,15,16,19,22,26,29,33,36,39,40,43,46,50,53,
-//                    57,60,63},{3,4,7,11,14,18,21,25,28,31,32,35,38,42,45,
-//                    49,52,55,56,59,62}};
-
-//byte cella[2][16] = {{0, 2, 4, 6, 8,
-//                     10,12,14,16,18,
-//                     20,22,24,26,28,
-//                     30},{32,34,36,38,
-//                     40,42,44,46,48,
-//                     50,52,54,56,58,
-//                     60,62}};
-
-byte cella[2][16] = {{0, 2, 4, 6, 16,
+//riserva colpi a griglie sfalsate
+uint8_t cella[2][16] = {{0, 2, 4, 6, 16,
                      18,20,22,32,34,
                      36,38,48,50,52,
                      54},{ 9,11,13,15,
@@ -228,6 +182,10 @@ byte cella[2][16] = {{0, 2, 4, 6, 16,
 //post modifica
 //Lo sketch usa 27234 byte (88%) dello spazio disponibile per i programmi. Il massimo è 30720 byte.
 //Le variabili globali usano 915 byte (44%) di memoria dinamica, lasciando altri 1133 byte liberi per le variabili locali. Il massimo è 2048 byte.
+
+// dimensioni programma al 20220513:
+// Sketch uses 25174 bytes (78%) of program storage space. Maximum is 32256 bytes.
+// Global variables use 1408 bytes (68%) of dynamic memory, leaving 640 bytes for local variables. Maximum is 2048 bytes.
 
 //============================================================================
 
@@ -294,7 +252,7 @@ void setup()
 
   //Predisposizione campo di battaglia proprio
   for (int i = 0; i < 64; i++) {
-    bFM[i] = fp;
+    bFM[i] = pm;
   }
 
 /*
@@ -317,25 +275,21 @@ void setup()
 
   //Predisposizione campo di battaglia avverso
   for (int i = 0; i < 64; i++) {
-    bFA[i] = fa;
+    bFA[i] = pm;
   }
   //Azzeramento matrice memNavi[]
   for (int i = 0; i < 12; i++) {
     memNavi[i] = 0;
   }
   //Inizializza variabili
-  nNavi = 0;
+//  nNavi = 0;
   ind = 0;
   fine = 16;
   lista = 0;
-  colpiPropri = 0;
-  colpiPropriAsegno = 0;
-  colpiAvverso = 0;
-  colpiAvversoAsegno = 0;
+
   regime = NORMALE;
   currLed = 35;   //posiziona cursore al centro del campo di battaglia
   randomSeed(analogRead(PIN_RANDOM));   //attiva generatore di numeri casuali
-  timeInit = millis();
 
   lt.whatsUp(Serial);
   Serial.println(F("Boot completed."));
@@ -347,9 +301,14 @@ void loop()
 {
 //==COMMENTARE PER DEBUG POSIZIONAMENTO NAVI AVVERSO
 //per saltare il posizionamento navi proprie
-//    PosizionaBFM();
+//    posiziona_navi_umano();
 
-    PosizionaBFA();
+/*
+ * bF:
+ * 1 = bFM
+ * 0 = bFA
+ */
+    posiziona_navi_computer(1);
 
   lcd.clear();
   lcd.print(F("    INIZIO      "));
@@ -360,20 +319,16 @@ void loop()
 
 #ifdef DEBUG
 Serial.println(F("15-Mostro campo AVVERSO"));
+/*
 //Mostra campo di battaglia avversario con posizionamento navi
   lcd.clear();
   lcd.print(F("- DEBUG: bFA  -"));
 delay(1000);
 
-for (int i=0; i<64; i++) {
+for (int i=0; i<64; i++)
+{
   int c = i % 8;
   int r = i / 8;
-/*
-  Serial.print(F(" c="));
-  Serial.print(c);
-  Serial.print(F(" r="));
-  Serial.println(r);
-*/
   lcd.setCursor(c,r);
 
   if (bFA[i] == pn)
@@ -384,9 +339,13 @@ for (int i=0; i<64; i++) {
     lcd.print(F("."));
   }
 
-  bFM[i] = bFA[i];
+//  bFM[i] = bFA[i];
 }
+*/
 //WS.show();
+draw_bf(1);
+delay(3000);
+draw_bf(0);
 delay(3000);
 #endif
 
@@ -394,18 +353,6 @@ delay(3000);
 
   currLed = 35;    //reset posizione iniziale del cursore al centro del campo
 
-  if (writer)
-  {
-    //TODO: turno 0 per copiare reciprocamente bFM e bFA, poi partire da turno 1 o 2 random
-    //Decisione su chi spara per primo
-    turno = random(0, 2); //turno is 0 or 1
-    lcd.clear();
-    lcd.print(F("    SORTEGGIO   "));
-    lcd.setCursor(0,2);
-    lcd.print(F("  CHI COMINCIA  "));
-  //  mp3.playFileByIndexNumber(BEEP);
-    delay(500);
-  }
 
   #ifdef DEBUG
   Serial.println(F("16-Se DEBUG turno iniziale = 0"));
@@ -420,16 +367,37 @@ delay(3000);
       Serial.println(turno, DEC);
 
       sync_check();
-      delay(5000);
+//      delay(5000);
 
       if (synced)
       {
+
+        if (turno == 0)
+        {
+          //se turno 0 ed ho copiato reciprocamente bFM e bFA, scelgo casualmente se partire da turno 1 o 2
+          //Decisione su chi spara per primo
+          turno = random(1, 3); //turno is 1 or 2
+          lcd.clear();
+          lcd.print(F("    SORTEGGIO   "));
+          lcd.setCursor(0,2);
+          lcd.print(F("  CHI COMINCIA  "));
+        }
+
         for (; ((turno%2)^(writer)); )
         {
-          Serial.println("eseguo turno di gioco");
-          //game_main();
-          game_play_umano();
-  //        game_fake();
+          //TODO
+          /*
+           * se su bFA ci sono 12 "as", hai vinto
+           * se su bFM ci sono 12 "as", hai perso
+           */
+          if (!game_verifica_fine())
+          {
+            Serial.println("eseguo turno di gioco");
+            //game_main();
+  //          game_play_umano();
+            game_play_computer(1);
+    //        game_fake();
+          }
         }
         Serial.println("fine turno di gioco");
       }else
@@ -450,11 +418,118 @@ delay(3000);
   }
 }
 
-void game_play_computer()
+bool game_verifica_fine()
+{
+  bool game_over = false;
+  uint8_t colpiPropriAsegno = 0;
+  uint8_t colpiAvversoAsegno = 0;
+  uint8_t colpiPropri = 0;
+  uint8_t colpiAvverso = 0;
+
+  //conto i colpi a segno
+  for (int i = 0; i < 64; i++)
+  {
+    if (bFA[i] == as)
+    {
+      colpiPropriAsegno++;
+    }
+    if (bFA[i] == av || bFA[i] == as)
+    {
+      colpiPropri++;
+    }
+
+    if (bFM[i] == as)
+    {
+      colpiAvversoAsegno++;
+    }
+    if (bFM[i] == av || bFM[i] == as)
+    {
+      colpiAvverso++;
+    }
+  }
+
+  //vittoria del giocatore
+  if (colpiPropriAsegno >= 12)
+  {
+    game_over = true;
+    lcd.clear();
+    lcd.print(F("GIOCO FINITO"));
+    delay(1000);
+    lcd.clear();
+    lcd.print(F("HAI VINTO TU"));
+  }
+
+  //vittoria dell'avversario
+  if (colpiAvversoAsegno >= 12)
+  {
+    game_over = true;
+    lcd.clear();
+    lcd.print(F("GIOCO FINITO"));
+    delay(1000);
+    lcd.clear();
+    lcd.print(F("HAI PERSO"));
+  }
+
+  if (game_over)
+  {
+    lcd.setCursor(0,2);
+    lcd.print(F("spari tuoi = "));
+    lcd.print(colpiPropri);
+    lcd.setCursor(0,3);
+    lcd.print(F("buoni = "));
+    lcd.print(colpiPropriAsegno);
+    lcd.print(F("/12"));
+    lcd.setCursor(0,5);
+    lcd.print(F("spari avv. = "));
+    lcd.print(colpiAvverso);
+    lcd.setCursor(0,6);
+    lcd.print(F("buoni = "));
+    lcd.print(colpiAvversoAsegno);
+    lcd.print(F("/12"));
+    delay(5000);
+
+    draw_bf(1); // 1 = bFM
+    delay(5000);
+    draw_bf(2); // 2 = bFA scoperto
+    delay(5000);
+  }
+
+
+Serial.print(F("colpiPropriAsegno = "));
+Serial.println(colpiPropriAsegno);
+Serial.print(F("colpiAvversoAsegno = "));
+Serial.println(colpiAvversoAsegno);
+Serial.print(F("game_over = "));
+Serial.println(game_over);
+
+    return game_over;
+}
+
+void game_play_computer(byte bF)
 {
 #ifdef DEBUG_avv
 Serial.println(F("22-Controllo colpo AVVERSO"));
 #endif
+
+        draw_bf(1); // 1 = bFM
+        delay(3000);
+        draw_bf(0);
+        delay(3000);
+
+/*
+ * bF:
+ * 1 = giocatore su bFM, attacca su bFA
+ * 0 = giocatore su bFA, attacca su bFM
+ */
+  byte* bFX;
+  if ( bF == 1 )
+  {
+    bFX = bFA;
+  }else
+  {
+    bFX = bFM;
+  }
+
         lcd.clear();
         lcd.print(F("TOCCA A ME"));
 /*
@@ -486,18 +561,25 @@ Serial.print(F(" fine="));
 Serial.println(fine);
 #endif
           if (lista == 2) {
-            //Overflow elenco colpi. Fine colpi a disposizione
+            //Fine colpi a disposizione
 #ifdef DEBUG_avv
-Serial.print(F("B06-OVERFLOW COLPI A DISPOSIZIONE"));
+Serial.print(F("B06-FINE COLPI A DISPOSIZIONE"));
 Serial.println(F("    PROGRAMMA BLOCCATO"));
 #endif
 //===========================================================================
+//               lcd.clear();
+//               lcd.print(F("PROGRAMMA BLOCCATO"));
+//               delay(3000);
+//               draw_bf(1); // 1 = bFM
+//               delay(3000);
+              draw_bf(0);
+//              delay(3000);
             while (true) ;
 //===========================================================================
           }
           //Colpo su pixel già a vuoto o già colpito
           //PUÒ CAPITARE PER I COLPI SULLE ADIACENZE CHE SONO FUORI lista[]
-          if (bFM[estratto] == av || bFM[estratto] == as) {
+          if (bFX[estratto] == av || bFX[estratto] == as) {
 #ifdef DEBUG_avv
 Serial.print(F("25-Pixel n. "));
 Serial.print(estratto);
@@ -513,7 +595,7 @@ Serial.println(F(" non sparabile (av o as)"));
 //(DX, SX, UP, DWN) pixel già sparati (av) o colpiti (as). però se le navi
 //sono affiancate potrebbe capitare che un pixel fosse rimasto isolato
 //==DA VERIFICARE ED EVENTUALMENTE MODIFICARE
-          if (ControllaPixelAdiacenti(estratto) == NONOK) {
+          if (ControllaPixelAdiacenti(estratto, bFX) == NONOK) {
 #ifdef DEBUG_avv
 Serial.print(F("26-Pixel n. "));
 Serial.print(estratto);
@@ -527,8 +609,8 @@ Serial.println(F(" attorniato da colpi già sparati (as) o a vuoto (av)"));
             return;
           }
           //Il pixel estratto ha passato tutti i controlli ed è sparabile
-          lcd.setCursor(15,1);
-          lcd.print(F("     "));
+//          lcd.setCursor(15,1);
+//          lcd.print(F("     "));
           lcd.setCursor(0,2);
           lcd.print(F("FATTO!"));
 //          WS.setPixelColor(estratto, WS.Color(cuR, cuG, cuB));
@@ -536,26 +618,23 @@ Serial.println(F(" attorniato da colpi già sparati (as) o a vuoto (av)"));
           delay(500);
           lcd.setCursor(0,3);
           lcd.print(F("-SPARO-"));
-          colpiAvverso++;
 #ifdef DEBUG_avv
-Serial.print(F("27-Sparato colpo n. "));
-Serial.print(colpiAvverso);
+Serial.print(F("27-Sparato colpo"));
 Serial.print(F(" in casella "));
 Serial.println(estratto);
 #endif
 
 //==Case AVVERSO regime NORMALE colpo a vuoto=================================
-          if (bFM[estratto] == fp) {
+          if (bFX[estratto] == pm) {
 #ifdef DEBUG_avv
-Serial.print(F("28-Colpo AVVERSO a vuoto n. "));
-Serial.println(colpiAvverso - colpiAvversoAsegno);
+Serial.print(F("28-Colpo AVVERSO a vuoto"));
 #endif
             lcd.setCursor(0,3);
             lcd.print(F("colpo a vuoto"));
 //            mp3.playFileByIndexNumber(SPLASH);
             delay(500);
             //cambia la condizione dei pixel da fp ad av
-            bFM[estratto] = av;
+            bFX[estratto] = av;
             //bFM[estratto][1] = avR; bFM[estratto][2] = avG; bFM[estratto][3] = avB;
             regime = NORMALE;
 //            turno = PROPRIO;
@@ -566,11 +645,9 @@ Serial.println(colpiAvverso - colpiAvversoAsegno);
 
 //==Case AVVERSO regime NORMALE colpo a segno=================================
           //è il primo colpo a segno
-          else if (bFM[estratto] == pn) {
-            colpiAvversoAsegno++;
+          else if (bFX[estratto] == pn) {
 #ifdef DEBUG_avv
-Serial.print(F("29-Colpo AVVERSO a segno n. "));
-Serial.println(colpiAvversoAsegno);
+Serial.print(F("29-Colpo AVVERSO a segno"));
 #endif
             //memorizza estratto in aSegno[ind] con ind=0
             aSegno[ind] = estratto;
@@ -585,7 +662,7 @@ Serial.println(F("]"));
             lcd.setCursor(0,3);
             lcd.print(F("colpo a segno!"));
             //cambia la condizione dei pixel da pn ad as
-            bFM[estratto] = as;
+            bFX[estratto] = as;
 //            bFM[estratto][1] = asR; bFM[estratto][2] = asG; bFM[estratto][3] = asB;
 //            mp3.playFileByIndexNumber(BOOM);
             //Entra in caccia alla nave
@@ -599,7 +676,7 @@ Serial.println(estratto);
             lcd.print(F("check adiacenze"));
             delay(500);
             //Calcolo delle adiacenze (max 4) del colpo a segno
-            CalcolaAdiacenze(estratto);
+            CalcolaAdiacenze(estratto, bFX);
 //SE IL CONTROLLO DEL COLPO SPARABILE COMPRENDEVA ANCHE IL CONTROLLO CHE NON
 //SI TRATTASSE DI UN COLPO ISOLATO, LA FUNZIONE RITORNA ALMENO 1 ADIACENZA.
 //SE INVECE IL CONTROLLO NON È STATO FATTO LA FUNZIONE PUÒ RITORNARE ANCHE
@@ -645,8 +722,8 @@ Serial.println(F("33-Regime CACCIA"));
 //IN REGIME CACCIA LE ADIACENZE DEL SOLO COLPO DOVREBBERO ESSERE GIÀ
 //CONTROLLATE E ALMENO UNA SPARABILE PERCHÈ IL CONTROLLO DEL PIXEL SINGOLO
 //ATTORNIATO DA A VUOTO O GIÀ SPARATI DOVREBBE ESSERE GIÀ STATO FATTO
-            if (adia[i] == 0 || bFM[adia[i]] == av ||
-                                bFM[adia[i]] == as) {
+            if (adia[i] == 0 || bFX[adia[i]] == av ||
+                                bFX[adia[i]] == as) {
               //adiacenza già usata o a vuoto o già sparata
               //predisponi uscita da for (int i=0; i<4; i++)
               //se le adia[i] sono tutte a 0 ho diritto a un altro colpo
@@ -659,15 +736,14 @@ Serial.println(F("33-Regime CACCIA"));
             lcd.setCursor(0,3);
             lcd.print(F("-SPARO-"));
             delay(1000);
-            colpiAvverso++;
 
 //==Caso AVVERSO regime CACCIA colpo a vuoto==================================
-            if (bFM[adia[i]] == fp) {
+            if (bFX[adia[i]] == pm) {
 #ifdef DEBUG_avv
 Serial.print(F("34-Adiacenza colpo a vuoto n. "));
 Serial.println(adia[i]);
 #endif
-              DispAvuoto(adia[i]);
+              DispAvuoto(adia[i], bFX);
               //azzera colpo
               adia[i] = 0;
 //Questa adiacenza ppotrebbe essere l'ultima della serie di max 4sparabili.
@@ -680,14 +756,13 @@ Serial.println(adia[i]);
             }
 
 //==Caso AVVERSO regime CACCIA colpo a segno==================================
-            if (bFM[adia[i]] == pn) {
-              colpiAvversoAsegno++;
+            if (bFX[adia[i]] == pn) {
 #ifdef DEBUG_avv
 Serial.print(F("35-Case AVVERSO regime CACCIA colpo a segno "));
 Serial.println(adia[i]);
 #endif
               //visualizza su display e campo di battaglia
-              DispAsegno(adia[i]);
+              DispAsegno(adia[i], bFX);
               //memorizza colpo in aSegno[ind] con ind=1
               aSegno[ind] = adia[i];
 #ifdef DEBUG_avv
@@ -738,7 +813,7 @@ Serial.println(minLim);
 #ifdef DEBUG_avv
 Serial.println(F("B3-Calcolo estremi nave orizzontale"));
 #endif
-                CalcHitOrizz();
+                CalcHitOrizz(bFX);
 #ifdef DEBUG_avv
 Serial.print(F("A0-Limite destro "));
 Serial.print(minHit);
@@ -752,7 +827,7 @@ Serial.println(maxHit);
 #ifdef DEBUG_avv
 Serial.println(F("A1-Calcolo estremi nave verticale"));
 #endif
-                CalcHitVert();
+                CalcHitVert(bFX);
 #ifdef DEBUG_avv
 Serial.print(F("A2-Limite superiore "));
 Serial.print(maxHit);
@@ -824,15 +899,14 @@ Serial.println(currLim);
           lcd.setCursor(0,3);
           lcd.print(F("-SPARO-"));
           delay(1000);
-          colpiAvverso++;
 
 //==Case AVVERSO regime COLPITO colpo a vuoto=================================
-          if (bFM[currLim] == fp) {
+          if (bFX[currLim] == pm) {
 #ifdef DEBUG_avv
 Serial.print(F("A4-Case AVVERSO regime COLPITO colpo a vuoto "));
 Serial.println(currLim);
 #endif
-            DispAvuoto(currLim);
+            DispAvuoto(currLim, bFX);
             //se non ci sono più limiti della nave da colpire
             if (minHit == 0 && maxHit == 0) {
 #ifdef DEBUG_avv
@@ -876,13 +950,12 @@ Serial.println(adia[1]);
           }    //FINE case AVVERSO regime COLPITO colpo a vuoto
 
 //==Case AVVERSO regime COLPITO colpo a segno=================================
-          if (bFM[currLim] == pn) {
-            colpiAvversoAsegno++;
+          if (bFX[currLim] == pn) {
 #ifdef DEBUG_avv
 Serial.print(F("A6-Case AVVERSO regime COLPITO colpo a segno "));
 Serial.println(currLim);
 #endif
-            DispAsegno(currLim);
+            DispAsegno(currLim, bFX);
             //memorizza colpo in asegno
 //LA MEMORIZZAZIONE DEVE AVVENIRE NEL PRIMO aSegno LIBERO INDICE ind==========
             aSegno[ind] = currLim;
@@ -916,7 +989,7 @@ Serial.print(minLim);
 Serial.print(F(" "));
 Serial.println(maxLim);
 #endif
-              CalcHitOrizz();
+              CalcHitOrizz(bFX);
 #ifdef DEBUG_avv
 Serial.print(F("B5-Limite superiore "));
 Serial.print(maxHit);
@@ -931,7 +1004,7 @@ Serial.print(minLim);
 Serial.print(F(" "));
 Serial.println(maxLim);
 #endif
-              CalcHitVert();
+              CalcHitVert(bFX);
             }
             //se non ci sono limiti sparabili la nave è affondata
             if (minHit == 0 && maxHit == 0) {
@@ -991,7 +1064,7 @@ for (;;) {//pausa per go
 }
 
         //Disegno campo di battaglia avverso
-        draw_bf(2);
+        draw_bf(0);
 //        send_bf(2);
     delay(300);
 
@@ -1014,19 +1087,16 @@ for (;;) {//pausa per go
         //Qui è stato premuto il pulsante di sparo
 //        delay(30);
         //Accendi pixel colpo
-        colpiPropri++;
 #ifdef DEBUG
-Serial.print(F("18-Sparato colpo n. "));
-Serial.print(colpiPropri);
+Serial.print(F("18-Sparato colpo"));
 Serial.print(F(" in casella "));
 Serial.println(currLed);
 #endif
 
 //==Case PROPRIO regime NORMALE colpo a vuoto=================================
-        if (bFA[currLed] == fa) {
+        if (bFA[currLed] == pm) {
 #ifdef DEBUG
-Serial.print(F("19-Colpo PROPRIO a vuoto n. "));
-Serial.println(colpiPropri - colpiPropriAsegno);
+Serial.print(F("19-Colpo PROPRIO a vuoto"));
 #endif
           lcd.setCursor(0,3);
           lcd.print(F("colpo a vuoto"));
@@ -1046,11 +1116,7 @@ Serial.println(colpiPropri - colpiPropriAsegno);
 
 //==Case PROPRIO regime NORMALE colpo a segno=================================
         else if (bFA[currLed] == pn) {
-          colpiPropriAsegno++;
-#ifdef DEBUG
-Serial.print(F("20-Colpo PROPRIO a segno n. "));
-Serial.println(colpiPropriAsegno);
-#endif
+
           lcd.setCursor(0,3);
           lcd.print(F("colpo a segno!"));
 //          mp3.playFileByIndexNumber(BOOM);
@@ -1150,7 +1216,7 @@ void game_reader()
 
       delay(100);//necessario!
       //send ACK
-
+/*
       if (L==15)
       {
         draw_bf(0);
@@ -1160,7 +1226,7 @@ void game_reader()
       {
         draw_bf(1);
       }
-
+*/
       if (L==16)
       {
         //16 = turno | bFA_ck | bFM_ck | _ | _ | _ | _ | _ | 0 | 16
@@ -1188,10 +1254,14 @@ void game_reader()
             //qui il flag di sync ok
             for (; ((turno%2)^(writer)); )
             {
-              Serial.println("eseguo turno di gioco");
-              //game_main();
-              game_play_umano();
-      //        game_fake();
+              if (!game_verifica_fine())
+              {
+                Serial.println("eseguo turno di gioco");
+                //game_main();
+  //              game_play_umano();
+                game_play_computer(1);
+        //        game_fake();
+              }
             }
             Serial.println("fine turno di gioco");
           }
@@ -1334,274 +1404,6 @@ void sync_check()
 
 }
 
-void do_test_ack(void)
-{
-  if (writer)
-  {
-    for (int i = 0; i < 8; i++)
-    {
-      if (i==8)
-      {
-        delay(1000);
-        //lcd.clear();
-
-        //game_main();
-
-      }else
-      {
-        delay(100);
-      }
-
-      delay(25);
-      //send a packet.
-      output[sizeof(output)-1] = i;   /* line number manually added @ last byte */
-//      output[sizeof(output)-1] = 7;   /* line number manually added @ last byte */
-      for(uint8_t c = 0; c < 8; c++ )
-      {
-        output[c] = bFM[(i*8)+c];
-      }
-      output[3] = i+0x30;
-      output[4] = random(65, 90);
-
-      output[8] = '\0';   /* null character manually added */
-      lcd.drawString(0,i,(char*)output);
-
-      //dump the outgoing packet.
-      for(int i = 0; i < sizeof(output); i++)
-      {
-        Serial.print(i);
-        Serial.print("=");
-        Serial.println(output[i], DEC);
-      }
-
-      //wait the ACK
-      for (bool ack=0; ack==0; )
-      {
-//        Serial.println(F("1for.."));
-        lt.sendPacket((uint8_t*)output, sizeof(output));
-        lt.whatsUp(Serial);
-        lt.startListening();
-//        Serial.println(F("2listen..."));
-
-        for (byte wh=0; (not lt.available()) and (wh < 50); wh++ )
-        {
-          Serial.print(F("while="));
-          Serial.print(wh);
-          Serial.print(F(" available="));
-          Serial.println((not lt.available()), DEC);
-          delay(100);
-        }
-
-        if (lt.available())
-        {
-          Serial.println(F("3Data available"));
-
-          uint8_t buf[32];
-          uint8_t L;
-
-          int packetSize = lt.read(buf, 32);
-          //int packetSize = lt.read((uint8_t*)buf, sizeof(buf));
-          if (packetSize > 0)
-          {
-            Serial.println(F("4Packet read OK"));
-            ack=1;
-
-            //dump the received packet.
-            for(int i = 0; i < packetSize; i++)
-            {
-              Serial.print(i);
-              Serial.print("K=");
-              Serial.println(buf[i], DEC);
-
-//              output[i]=buf[i]; //copy the byte
-
-            }
-//            //output[8] = '\0';   /* null character manually added */
-//            Serial.print(" line = ");
-//            L = (buf[sizeof(output)-1]?buf[sizeof(output)-1]:0);
-//            Serial.print(L, DEC);
-//            Serial.print(" ack = ");
-//            Serial.print(output[0]-0x30, DEC);
-//            Serial.println();
-          }
-          else
-          {
-            Serial.println(F("5Packet read fail"));
-            lt.whatsUp(Serial);
-            delay(10);
-          }
-        }
-      }
-    }
-
-  }else //reader
-  {
-    if (lt.available())
-    {
-      Serial.println(F("Data available"));
-
-      uint8_t buf[32];
-      uint8_t L;
-
-      int packetSize = lt.read(buf, 32);
-      if (packetSize > 0)
-      {
-        Serial.print(F("Packet read OK size="));
-        Serial.println(packetSize);
-        //dump the received packet.
-        for(int i = 0; i < packetSize; i++)
-        {
-          Serial.print(i);
-          Serial.print("=");
-          Serial.println(buf[i]);
-        }
-
-        L = (buf[sizeof(output)-1]?buf[sizeof(output)-1]:0);
-        Serial.print(" line = ");
-        Serial.println(L, DEC);
-
-        //dump the received packet.
-        for(int i = 0; i < 8; i++)
-        {
-/*
-          Serial.print(i);
-          Serial.print("=");
-          Serial.println(buf[i]);
-*/
-          if (turno < buf[8]) // buono il remoto
-          {
-            output[i]=buf[i]; //copy the byte
-
-            if ((unsigned)(L) <= 7) //0..7
-            {
-              if (i < 8) bFM[(L*8)+i]=buf[i]; //copy the byte
-            }
-            if ((unsigned)(L-8) <= 7) //8..15
-            {
-              if (i < 8) bFA[((L-8)*8)+i]=buf[i]; //copy the byte
-            }
-          }else // buono il locale
-          {
-            if ((unsigned)(L) <= 7) //0..7
-            {
-              if (i < 8) output[i] = bFM[(L*8)+i]; //copy the byte
-            }
-            if ((unsigned)(L-8) <= 7) //8..15
-            {
-              if (i < 8) output[i] = bFA[((L-8)*8)+i]; //copy the byte
-            }
-          }
-        }
-
-
-        delay(100);//necessario!
-        //send ACK
-//////        buf[sizeof(buf)-1] = 9;   /* line number manually added @ last byte */
-//        lt.sendPacket((uint8_t*)buf, sizeof(output));
-//        lt.whatsUp(Serial);
-
-        if (L==15)
-        {
-          draw_bf(0);
-        }
-
-        if (L==7)
-        {
-          draw_bf(1);
-        }
-
-        if (L==16)
-        {
-          //16 = turno | bFA_ck | bFM_ck | _ | _ | _ | _ | _ | 0 | 16
-
-          byte bFA_ck = 0;
-          byte bFM_ck = 0;
-          for (int i = 0; i < 64; i++) {
-            bFA_ck += bFA[i];
-            bFM_ck += bFM[i];
-          }
-          Serial.print("turno = ");
-          Serial.println(turno, DEC);
-          Serial.print("bFA_ck = ");
-          Serial.println(bFA_ck, DEC);
-          Serial.print("bFM_ck = ");
-          Serial.println(bFM_ck, DEC);
-
-          if ((bFA_ck == buf[1])&&(bFM_ck == buf[2]))
-          {
-            if (turno < buf[0])
-            {
-              turno = buf[0];
-              Serial.println("copio il turno remoto... ");
-              //qui il flag di sync ok
-            }
-          }
-
-          output[0] = turno;
-          output[1] = bFA_ck;
-          output[2] = bFM_ck;
-          output[3] = 0;
-          output[4] = 0;
-          output[5] = 0;
-          output[6] = 0;
-          output[7] = 0;
-//          output[8] = turno;
-          output[sizeof(output)-1] = 16;   /* line number manually added @ last byte */
-        }
-
-        //send ACK
-        output[8] = turno;
-        output[9] = L;
-
-        Serial.println();
-        Serial.println("invio questo ack:");
-        Serial.println((char *) output);
-        for(int i = 0; i < sizeof(output); i++)
-        {
-          Serial.print(i);
-          Serial.print("=");
-          Serial.println(buf[i]);
-        }
-        lt.sendPacket((uint8_t*)output, sizeof(output));
-
-      }
-      else
-      {
-        Serial.println(F("Packet read fail"));
-//        lt.whatsUp(Serial);
-      }
-
-      lt.startListening();
-    /*
-    } else
-    {
-      //Disegno campo di battaglia proprio
-      draw_bf(1);
-      delay(2000);
-      //Disegno campo di battaglia avverso
-      draw_bf(2);
-      delay(2000);
-    */
-    }
-  }
-
-  if(Serial.available() > 0)
-  {
-    str = Serial.readStringUntil('\n');
-    Serial.println(str);
-    str.trim();
-    //x = Serial.parseInt();
-/*
-    if (strcmp(str.c_str(),'a') == 0) Serial.println("AAA");
-    else if (strcmp(str.c_str(),'s') == 0) Serial.println("SSS");
-    else if (strcmp(str.c_str(),'d') == 0) Serial.println("DDD");
-    else if (strcmp(str.c_str(),'w') == 0) Serial.println("WWW");
-    else Serial.println("???");
-*/
-  }
-}
-
-
 void draw_bf(byte bF)
 {
   lcd.clear();
@@ -1623,15 +1425,15 @@ void draw_bf(byte bF)
       lcd.write(bFM[i]);
     } else
     {
-/*
-      if (bFA[i] == pn)
+
+      if (bFA[i] == pn && bF == 0)
       {
-        lcd.write(fp); //camuffo nave avversaria ignota
+        lcd.write(pm); //camuffo nave avversaria ignota
       } else
       {
-*/
         lcd.write(bFA[i]);
-//      }
+      }
+
     }
   }
 
@@ -1644,20 +1446,18 @@ void draw_bf(byte bF)
   {
     lcd.print(F("bFA"));
   }
+  lcd.setCursor(9,5);
+  lcd.print(F("T="));
+  lcd.print(turno);
 #endif
 
 }
 
 bool msg_send()
 {
-/*
-  lt.begin();
-  lt.setCurrentControl(4,15);
-  lt.setDataRate(LT8900::LT8910_62KBPS);
-  lt.setChannel(0x06);
-*/
 
   bool same_msg=false;
+  byte retry_counter = 0;
 
       //send and wait the ACK
       for (bool ack=0; ack==0; )
@@ -1676,13 +1476,13 @@ bool msg_send()
         lt.startListening();
 //        Serial.println(F("2listen..."));
 
-        for (byte wh=0; (not lt.available()) and (wh < 50); wh++ )
+        for (byte wh=0; (not lt.available()) and (wh < 30); wh++ )
         {
           Serial.print(F("while="));
           Serial.print(wh);
           Serial.print(F(" available="));
           Serial.println((not lt.available()), DEC);
-          delay(100);
+          delay(200);
         }
 
         if (lt.available())
@@ -1722,6 +1522,20 @@ bool msg_send()
             Serial.println(F("5Packet read fail"));
 //            lt.whatsUp(Serial);
             delay(10);
+          }
+        }else
+        {
+          retry_counter++;
+          Serial.print("retry_counter = ");
+          Serial.println(retry_counter, DEC);
+
+          if (retry_counter>5)
+          {
+            Serial.println("resetting the radio");
+            lt.begin();
+            lt.setCurrentControl(4,15);
+            lt.setDataRate(LT8900::LT8910_62KBPS);
+            lt.setChannel(0x06);
           }
         }
       }
@@ -1773,33 +1587,12 @@ void send_bf(byte bF)
       //msg_send();
       if (!msg_send())
       {
-/*
-        if (turno < input[8]) // buono il remoto
-        {
-          uint8_t L = input[9];
-          //TODO: potrebbe essere utile verificare che la linea di input coincida con output
-          for(int i = 0; i < 8; i++)
-          {
-            if ((unsigned)(L) <= 7) //0..7
-            {
-              if (i < 8) bFM[(L*8)+i]=input[i]; //copy the byte
-            }
-            if ((unsigned)(L-8) <= 7) //8..15
-            {
-              if (i < 8) bFA[((L-8)*8)+i]=input[i]; //copy the byte
-            }
-          }
-        }
-*/
-
-
 
         uint8_t L = input[9];
         Serial.print("message type: sent = ");
         Serial.print(output[9], DEC);
         Serial.print(" received = ");
         Serial.println(L, DEC);
-
 
         if ((turno == 0) and (L == output[9]))
         {
@@ -1847,7 +1640,7 @@ void send_bf(byte bF)
 
 //==FUNZIONI=================================================================
 
-void PosizionaBFM(void) {
+void posiziona_navi_umano(void) {
 //==POSIZIONAMENTO NAVI PROPRIE===============================================
 //Sono da posizionare: una nave da 4 (corazzata), due navi da 3
 //(cacciatorpediniere) e una nave da 2 (motovedetta).
@@ -1947,7 +1740,8 @@ Serial.println(F("08-Termine posizionamento navi proprie"));
 #endif
 }
 
-void PosizionaBFA(void) {
+void posiziona_navi_computer(byte bF)
+{
 #ifdef DEBUG
 Serial.println(F("09-Inizio posizionamento navi avversarie"));
 #endif
@@ -2076,235 +1870,31 @@ Serial.println(F("14-Termine posizionamento navi avversarie"));
 
   //Predisponi campo di battaglia avverso
   for (int i = 0; i < 64; i++) {
-    bFA[i] = fa;// bFA[i][1] = faR; bFA[i][2] = faG; bFA[i][3] = faB;
+    if ( bF == 1 )
+    {
+      bFM[i] = pm;
+    }else
+    {
+      bFA[i] = pm;
+    }
   }
   //Trasferimento navi avversario in campo di battaglia avversario
   //Il trasferimento deve avvenire SOLO con il marcatore (bFA[0]=pn) perché
   //occorre evitare che durante lo spostamento del cursore venga evidenziata
   //la posizione delle navi avversarie.
   for (int i = 0; i < 12; i++) {
-    bFA[memNavi[i]] = pn;
-  }
-}
-
-void game_main(void) {
-//==QUESTA È LA ROUTINE PRINCIPALE DEL PROGRAMMA================================
-//Il programma resta in questa loop finché non sono state affondate tutte e 4
-//le navi proprie o dell'avversario.
-//A quel punto il programma mostra in continuazione alternativamente lo stato
-//del campo di battaglia proprio e avverso con tutte le navi
-
-//  for (;;) {
-    switch (turno%2) {
-
-//==CONTROLLO COLPO PROPRIO==================================================
-      game_play_umano();
-//==CONTROLLO COLPO AVVERSO==================================================
-      game_play_computer();
-    }   //FINE switch (turno)
-
-    //Controllo totale affondamento navi
-#ifdef DEBUG
-Serial.println(F("==========================="));
-Serial.print(F("turno = "));
-Serial.println(turno);
-send_bf(turno%2);
-#endif
-    if (colpiPropriAsegno == 12 || colpiAvversoAsegno == 12) {
-      //Gioco finito
-#ifdef DEBUG
-Serial.println(F("44-GIOCO FINITO"));
-#endif
-//      break;    //esce da for(;;)
-      //BLOCCA IL GIOCO FINO AL RESET
-      for (;;)
-      {
-        lcd.clear();
-        lcd.print(F("GIOCO FINITO"));
-        delay(1000);
-        //Disegno campo avverso
-        draw_bf(2);
-        delay(5000);
-      }
-
+/*
+ * bF:
+ * 1 = bFM
+ * 0 = bFA
+ */
+    if ( bF == 1 )
+    {
+      bFM[memNavi[i]] = pn;
+    }else
+    {
+      bFA[memNavi[i]] = pn;
     }
-    //Se break; esce dal loop for(;;)
-//  }   //FINE for (;;)
-}
-
-void game_end(void) {
-
-  //Incrementa numero battaglie giocate
-  valE = EEPROM.read(totBattLsb);
-  if (valE+1 < 256) {
-    EEPROM.write(totBattLsb, valE+1);
-  }
-  else {
-    EEPROM.write(totBattLsb, 0);
-    valE = EEPROM.read(totBattMsb);
-    EEPROM.write(totBattMsb, valE+1);
-  }
-
-  //Proclamazione vincitore e statistiche
-  timeTotal = (millis() - timeInit) / 1000;
-  lcd.clear();
-//  mp3.playFileByIndexNumber(BLUB);
-  //vittoria del giocatore
-  if (colpiPropriAsegno == 12) {
-    //incrementa statistiche TU
-    //Incrementa numero battaglie vinte
-    valE = EEPROM.read(totVinTuLsb);
-    if (valE+1 < 256) {
-      EEPROM.write(totVinTuLsb, valE+1);
-    }
-    else {
-      EEPROM.write(totVinTuLsb, 0);
-      valE = EEPROM.read(totVinTuMsb);
-      EEPROM.write(totVinTuMsb, valE+1);
-    }
-    //Incrementa numero colpi sparati
-    valE = EEPROM.read(totColpTuMsb) * 256 + EEPROM.read(totColpTuLsb)
-           + colpiPropri;
-    EEPROM.write(totColpTuMsb, valE / 256);
-    EEPROM.write(totColpTuLsb, valE % 256);
-    //Attualizza record colpi
-    if (colpiPropri < EEPROM.read(recColpTu)) {
-      EEPROM.write(recColpTu, colpiPropri);
-    }
-
-    lcd.print(F("HAI VINTO TU"));
-    lcd.setCursor(0,1);
-    lcd.print(F("colpi sparati"));
-    lcd.setCursor(14,1);
-    lcd.print(colpiPropri);
-    lcd.setCursor(0,2);
-    lcd.print(F("tempo impiegato"));
-    lcd.setCursor(16,2);
-    lcd.print(timeTotal);
-    lcd.setCursor(19,2);
-    lcd.print(F("s"));
-    delay(3000);
-  }
-  //vittoria di Arduino
-  if (colpiAvversoAsegno == 12) {
-    //incrementa statistiche IO
-    //Incrementa numero battaglie vinte
-    valE = EEPROM.read(totVinIoLsb);
-    if (valE+1 < 256) {
-      EEPROM.write(totVinIoLsb, valE+1);
-    }
-    else {
-      EEPROM.write(totVinIoLsb, 0);
-      valE = EEPROM.read(totVinIoMsb);
-      EEPROM.write(totVinIoMsb, valE+1);
-    }
-    //Incrementa numero colpi sparati
-    valE = EEPROM.read(totColpIoMsb) * 256 + EEPROM.read(totColpIoLsb)
-           + colpiAvverso;
-    EEPROM.write(totColpIoMsb, valE / 256);
-    EEPROM.write(totColpIoLsb, valE % 256);
-    //Attualizza record colpi
-    if (colpiAvverso < EEPROM.read(recColpIo)) {
-      EEPROM.write(recColpIo, colpiAvverso);
-    }
-
-    lcd.print(F("HO VINTO IO"));
-    lcd.setCursor(0,1);
-    lcd.print(F("colpi sparati"));
-    lcd.setCursor(14,1);
-    lcd.print(colpiAvverso);
-    lcd.setCursor(0,2);
-    lcd.print(F("tempo impiegato"));
-    lcd.setCursor(16,2);
-    lcd.print(timeTotal);
-    lcd.setCursor(19,2);
-    lcd.print(F("s"));
-    delay(3000);
-  }
-  Serial.print(F("Totale battaglie = "));
-  Serial.println(EEPROM.read(totBattMsb) * 256 + EEPROM.read(totBattLsb));
-  Serial.println(F("Lettura dati Io"));
-  Serial.print(F("Vittorie = "));
-  Serial.print(EEPROM.read(totVinIoMsb) * 256 + EEPROM.read(totVinIoLsb));
-  Serial.print(F("; Colpi = "));
-  Serial.print(EEPROM.read(totColpIoMsb) * 256 + EEPROM.read(totColpIoLsb));
-  Serial.print(F("; Record = "));
-  Serial.println(EEPROM.read(recColpIo));
-  Serial.println(F("Lettura dati Tu"));
-  Serial.print(F("Vittorie = "));
-  Serial.print(EEPROM.read(totVinTuMsb) * 256 + EEPROM.read(totVinTuLsb));
-  Serial.print(F("; Colpi = "));
-  Serial.print(EEPROM.read(totColpTuMsb) * 256 + EEPROM.read(totColpTuLsb));
-  Serial.print(F("; Record = "));
-  Serial.println(EEPROM.read(recColpTu));
-
-  //BLOCCA IL GIOCO FINO AL RESET
-  for (;;) {
-    //Disegno campo avverso
-    draw_bf(2);
-    delay(5000);
-
-    //Statistiche IO (Arduino) su display
-    lcd.clear();
-    lcd.print(F("TOTALE BATTAGLIE"));
-    lcd.print(EEPROM.read(totBattMsb) * 256 + EEPROM.read(totBattLsb));
-    lcd.setCursor(0,1);
-    lcd.print(F("IO NE HO VINTE "));
-    vittorie = EEPROM.read(totVinIoMsb) * 256 + EEPROM.read(totVinIoLsb);
-    lcd.print(vittorie);
-    lcd.setCursor(0,2);
-    lcd.print(F("MEDIA COLPI IO "));
-    colpi = EEPROM.read(totColpIoMsb) * 256 +
-                    EEPROM.read(totColpIoLsb);
-    if (colpi == 0) {
-      lcd.print(F("0"));
-    }
-    else {
-      intColpi = (((EEPROM.read(totColpIoMsb) * 256 +
-                    EEPROM.read(totColpIoLsb)) * 10) / vittorie) / 10;
-      lcd.print(intColpi);
-      lcd.print(F(","));
-      decColpi = (((EEPROM.read(totColpIoMsb) * 256 +
-                    EEPROM.read(totColpIoLsb)) * 10) / vittorie) % 10;
-      lcd.print(decColpi);
-    }
-    lcd.setCursor(0,3);
-    lcd.print(F("RECORD COLPI IO "));
-    lcd.print(EEPROM.read(recColpIo));
-    delay(5000);
-
-    //Disegno campo proprio
-    draw_bf(1);
-    delay(5000);
-
-    //Statistiche TU (giocatore) su display
-    lcd.clear();
-    lcd.print(F("TOTALE BATTAGLIE"));
-    lcd.print(EEPROM.read(totBattMsb) * 256 + EEPROM.read(totBattLsb));
-    lcd.setCursor(0,1);
-    lcd.print(F("TU NE HAI VINTE "));
-    vittorie = EEPROM.read(totVinTuMsb) * 256 + EEPROM.read(totVinTuLsb);
-    lcd.print(vittorie);
-    lcd.setCursor(0,2);
-    lcd.print(F("MEDIA COLPI TU "));
-    colpi = EEPROM.read(totColpTuMsb) * 256 +
-                    EEPROM.read(totColpTuLsb);
-    if (colpi == 0) {
-      lcd.print(F("0"));
-    }
-    else {
-      intColpi = (((EEPROM.read(totColpTuMsb) * 256 +
-                    EEPROM.read(totColpTuLsb)) * 10) / vittorie) / 10;
-      lcd.print(intColpi);
-      lcd.print(F(","));
-      decColpi = (((EEPROM.read(totColpTuMsb) * 256 +
-                    EEPROM.read(totColpTuLsb)) * 10) / vittorie) % 10;
-      lcd.print(decColpi);
-    }
-    lcd.setCursor(0,3);
-    lcd.print(F("RECORD COLPI TU "));
-    lcd.print(EEPROM.read(recColpTu));
-    delay(5000);
   }
 }
 
@@ -2960,7 +2550,7 @@ if (redraw == true)
 //  send_bf(1);
 //  send_bf(2);
 
-  draw_bf(2);
+  draw_bf(0);
   int c = currLed % 8;
   int r = currLed / 8;
 //  Serial.print(F(" c="));
@@ -2983,97 +2573,116 @@ if (redraw == true)
 
 //---------------------------------------------------------------------------
 //Questa funzione estrae un colpo casuale dall'array celle[]
-void EstraiColpo(int ind) {
-//   if (colpiAvverso == 0) {
-//     estratto = 0;
-//   }
-//   else {
-    casuale = random(0, fine);
-    estratto = cella[ind][casuale];
-    cella[ind][casuale] = cella[ind][fine - 1];
-    fine = fine - 1;
-    if (fine == 0) {
-      fine = 16;
-      lista = lista+1;
-    }
-//  }
+void EstraiColpo(int ind)
+{
+  uint8_t casuale;
+
+  casuale = random(0, fine);
+  estratto = cella[ind][casuale];
+  cella[ind][casuale] = cella[ind][fine - 1];
+  fine = fine - 1;
+  if (fine == 0)
+  {
+    fine = 16;
+    lista = lista+1;
+  }
 }
 
 
 //---------------------------------------------------------------------------
 //Questa funzione controlla che i pixel adiacenti a quello sparabile non siano
 //tutti già sparati (av) o già colpiti (as)
-boolean ControllaPixelAdiacenti(int pixel) {
+boolean ControllaPixelAdiacenti(int pixel, byte* bFX)
+{
+Serial.print("in ControllaPixelAdiacenti...");
+//           Serial.print(bFX[pixel], DEC);
+//           Serial.print(" +1= ");
+//           Serial.print(bFX[pixel+1], DEC);
+//           Serial.print(" -1= ");
+//           Serial.print(bFX[pixel-1], DEC);
+//           Serial.print(" -8= ");
+//           Serial.println(bFX[pixel-8], DEC);
+
   //SE pixel è 0
   if (pixel == 0) {
-    if ((bFM[1] == av || bFM[1] == as) &&
-        (bFM[8] == av || bFM[8] == as)) {
+    if ((bFX[1] == av || bFX[1] == as) &&
+        (bFX[8] == av || bFX[8] == as)) {
+      Serial.println("A");
       return NONOK;
     }
   }
   //SE pixel è 7
   else if (pixel == 7) {
-    if ((bFM[6] == av || bFM[6] == as) &&
-        (bFM[15] == av || bFM[15] == as)) {
+    if ((bFX[6] == av || bFX[6] == as) &&
+        (bFX[15] == av || bFX[15] == as)) {
+      Serial.println("B");
       return NONOK;
     }
   }
   //SE pixel è 56
   else if (pixel == 56) {
-    if ((bFM[48] == av || bFM[48] == as) &&
-        (bFM[57] == av || bFM[57] == as)) {
+    if ((bFX[48] == av || bFX[48] == as) &&
+        (bFX[57] == av || bFX[57] == as)) {
+      Serial.println("C");
       return NONOK;
     }
   }
   //SE pixel è 63
   else if (pixel == 63) {
-    if ((bFM[55] == av || bFM[55] == as) &&
-        (bFM[62] == av || bFM[62] == as)) {
+    if ((bFX[55] == av || bFX[55] == as) &&
+        (bFX[62] == av || bFX[62] == as)) {
+      Serial.println("D");
       return NONOK;
     }
   }
-  //SE pixel è <63 e >56
-  else if (pixel < 63 && pixel > 56) {
-    if ((bFM[pixel+1] == av || bFM[pixel+1] == as) &&
-        (bFM[pixel-1] == av || bFM[pixel-1] == as) &&
-        (bFM[pixel-8] == av || bFM[pixel-8] == as)) {
+  //SE pixel è >56 e <63 (linea di base)
+  else if (pixel > 56 && pixel < 63)
+  {
+    if ((bFX[pixel+1] == av || bFX[pixel+1] == as) &&
+        (bFX[pixel-1] == av || bFX[pixel-1] == as) &&
+        (bFX[pixel-8] == av || bFX[pixel-8] == as)) {
+      Serial.println("E");
       return NONOK;
     }
   }
-  //SE pixel è <7 e >0
-  else if (pixel < 7 && pixel > 0) {
-    if ((bFM[pixel+1] == av || bFM[pixel+1] == as) &&
-        (bFM[pixel-1] == av || bFM[pixel-1] == as) &&
-        (bFM[pixel+8] == av || bFM[pixel+8] == as)) {
+  //SE pixel è >0 e <7 (linea di testa)
+  else if (pixel > 0 && pixel < 7) {
+    if ((bFX[pixel+1] == av || bFX[pixel+1] == as) &&
+        (bFX[pixel-1] == av || bFX[pixel-1] == as) &&
+        (bFX[pixel+8] == av || bFX[pixel+8] == as)) {
+      Serial.println("F");
       return NONOK;
     }
   }
   //SE pixel è su colonna sinistra escluso 7 e 63 già testati
   else if (pixel %8 == 7) {
-    if ((bFM[pixel+8] == av || bFM[pixel+8] == as) &&
-        (bFM[pixel-8] == av || bFM[pixel-8] == as) &&
-        (bFM[pixel-1] == av || bFM[pixel-1] == as)) {
+    if ((bFX[pixel+8] == av || bFX[pixel+8] == as) &&
+        (bFX[pixel-8] == av || bFX[pixel-8] == as) &&
+        (bFX[pixel-1] == av || bFX[pixel-1] == as)) {
+      Serial.println("G");
       return NONOK;
     }
   }
   //SE pixel è su colonna destra escluso 0 e 56 già testati
   else if (pixel %8 == 0) {
-    if ((bFM[pixel+8] == av || bFM[pixel+8] == as) &&
-        (bFM[pixel-8] == av || bFM[pixel-8] == as) &&
-        (bFM[pixel-1] == av || bFM[pixel-1] == as)) {
+    if ((bFX[pixel+8] == av || bFX[pixel+8] == as) &&
+        (bFX[pixel-8] == av || bFX[pixel-8] == as) &&
+        (bFX[pixel-1] == av || bFX[pixel-1] == as)) {
+      Serial.println("H");
       return NONOK;
     }
   }
-  else {
-    return OK;
-  }
+
+  Serial.println("OK");
+  return OK;
 }
 
 
 //---------------------------------------------------------------------------
 //Questa funzione calcola le adiacenze di un colpo a segno e popola la matrice
 //adia[] (nell'ordine DX, UP, SX, DWN) SOLO con le adiacenze sparabili
-void CalcolaAdiacenze(int val) {
+void CalcolaAdiacenze(int val, byte* bFX)
+{
   //Adiacenza a destra
   if (val % 8 != 0) {    //se NON siamo sull'ultima colonna di destra
     for (int i=0; i<4; i++) {
@@ -3136,7 +2745,7 @@ Serial.println(val-8);
   }
   //Spunta adiacenze già colpite (as) o già sparate (av)
   for (int i=0; i<4; i++) {
-    if (bFM[adia[i]] == as || bFM[adia[i]] == av) {
+    if (bFX[adia[i]] == as || bFX[adia[i]] == av) {
 #ifdef DEBUG_avv
 Serial.print(F("88-Cancellata adiacenza n. "));
 Serial.print(i);
@@ -3151,41 +2760,44 @@ Serial.println(adia[i]);
 
 //---------------------------------------------------------------------------
 //Questa funzione visualizza il display a vuoto Avverso
-void DispAvuoto(int curs) {
+void DispAvuoto(int curs, byte* bFX)
+{
   lcd.setCursor(0,3);
   lcd.print(F("colpo a vuoto"));
-//  mp3.playFileByIndexNumber(SPLASH);
   delay(1000);
+
   //cambio condizione pixel da fp a av
-  bFM[curs] = av;// bFM[curs][1] = avR; bFM[curs][2] = avG; bFM[curs][3] = avB;
+  bFX[curs] = av;
 }
 
 
 //---------------------------------------------------------------------------
 //Questa funzione visualizza il display a segno Avverso
-void DispAsegno(int curs) {
+void DispAsegno(int curs, byte* bFX)
+{
   lcd.setCursor(0,3);
   lcd.print(F("colpo a segno"));
-//  mp3.playFileByIndexNumber(BOOM);
   delay(1000);
+
   //cambio condizione pixel da pn a as
-  bFM[curs] = as;// bFM[curs][1] = asR; bFM[curs][2] = asG; bFM[curs][3] = asB;
+  bFX[curs] = as;
 }
 
 
 //---------------------------------------------------------------------------
 //Questa funzione calcola i limiti di una nave orizzontale
-void CalcHitOrizz() {
+void CalcHitOrizz(byte* bFX)
+{
   //se minLim NON è in colonna destra e il limite è sparabile
-  if (minLim % 8 != 0 && bFM[minLim-1] != as &&
-                         bFM[minLim-1] != av) {
+  if (minLim % 8 != 0 && bFX[minLim-1] != as &&
+                         bFX[minLim-1] != av) {
     //piazza limite destro
     minHit = minLim - 1;
   }
   else minHit = 0;
   //se maxLim NON è in colonna sinistra e il limite è sparabile
-  if (maxLim % 8 != 7 && bFM[maxLim+1] != as &&
-                         bFM[maxLim+1] != av) {
+  if (maxLim % 8 != 7 && bFX[maxLim+1] != as &&
+                         bFX[maxLim+1] != av) {
     //piazza limite sinistro
     maxHit = maxLim + 1;
   }
@@ -3196,19 +2808,20 @@ void CalcHitOrizz() {
 //---------------------------------------------------------------------------
 //Questa funzione calcola i limiti di una nave verticale
 //Qui si arriva con adia[0] e adia[1] già azzarati
-void CalcHitVert() {
+void CalcHitVert(byte* bFX)
+{
   //se maxLim NON è sulla riga superiore
   //e il pixel è sparabile
-  if (maxLim < 56 && bFM[maxLim+8] != as &&
-                     bFM[maxLim+8] != av) {
+  if (maxLim < 56 && bFX[maxLim+8] != as &&
+                     bFX[maxLim+8] != av) {
     //piazza limite superiore
     maxHit = maxLim + 8;
   }
   else maxHit = 0;
   //se minLim NON è sulla riga inferiore
   //e il pixel è sparabile
-  if (minLim > 7 && bFM[minLim-8] != as &&
-                    bFM[minLim-8] != av) {
+  if (minLim > 7 && bFX[minLim-8] != as &&
+                    bFX[minLim-8] != av) {
     //piazza limite inferiore
     minHit = minLim - 8;
   }
@@ -3219,22 +2832,18 @@ void CalcHitVert() {
 //---------------------------------------------------------------------------
 //Questa funzione sposta una nave di lunghezza nPix all'indirizzo *nave nella
 //direzione dir SU, GIU, DST, SIN.
-void SpostaNave(int *nave, int nPix, int dir) {
+void SpostaNave(int *nave, int nPix, int dir)
+{
   toggleGO = PIAZZA;
-/*
-  for (int i=0; i<64; i++) {
-    bFT[*(nave+i)] = fp;
-  }
-*/
-  //ripristina pixel (fp o pn)
-  for (int i=0; i<nPix; i++) {
-    if (bFM[*(nave+i)] == fp) {
-        bFM[*(nave+i)] = fp;
-//      bFM[*(nave+i)][1] = fpR; bFM[*(nave+i)][2] = fpG; bFM[*(nave+i)][3] = fpB;
+
+  //ripristina pixel (pm o pn)
+  for (int i=0; i<nPix; i++)
+  {
+    if (bFM[*(nave+i)] == pm) {
+        bFM[*(nave+i)] = pm;
     }
     if (bFM[*(nave+i)] == pn) {
         bFM[*(nave+i)] = pn;
-//      bFM[*(nave+i)][1] = pnR; bFM[*(nave+i)][2] = pnG; bFM[*(nave+i)][3] = pnB;
     }
   }
 
@@ -3242,14 +2851,12 @@ void SpostaNave(int *nave, int nPix, int dir) {
   draw_bf(1);
 
   //muovi nave in nuova posizione
-  for (int i=0; i<nPix; i++) {
+  for (int i=0; i<nPix; i++)
+  {
     if (dir == SU) *(nave+i) = *(nave+i) + 8;
     if (dir == GIU) *(nave+i) = *(nave+i) - 8;
     if (dir == DST) *(nave+i) = *(nave+i) - 1;
     if (dir == SIN) *(nave+i) = *(nave+i) + 1;
-    //TODO: forse qualcosa
-    ///bFT[*(nave+i)] = 88;//pn;
-    //bFM[*(nave+i)][1] = pnR; bFM[*(nave+i)][2] = pnG; bFM[*(nave+i)][3] = pnB;
 
     int c = *(nave+i) % 8;
     int r = *(nave+i) / 8;
@@ -3260,25 +2867,6 @@ void SpostaNave(int *nave, int nPix, int dir) {
     lcd.setCursor(c,r);
     lcd.print(F("N"));
   }
-
-/*
-  int c = currLed % 8;
-  int r = currLed / 8;
-  Serial.print(F(" c="));
-  Serial.print(c);
-  Serial.print(F(" r="));
-  Serial.println(r);
-  lcd.setCursor(c,r);
-  lcd.print(F("@"));
-*/
-
-  //ridisegna schermo
-//  for (int i=0; i<64; i++) {
-//    WS.setPixelColor(i, WS.Color(bFM[i][1],bFM[i][2],bFM[i][3]));
-//  }
-//  WS.show();
-//draw_bf(1);
-
 }
 
 
